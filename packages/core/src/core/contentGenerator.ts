@@ -110,6 +110,16 @@ export async function createContentGenerator(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   fullConfig?: any, // Optional full Config object for GBNF support
 ): Promise<ContentGenerator> {
+  // Check if model has a provider prefix (e.g., "ollama:llama3")
+  const { createProviderFromModel } = await import('../providers/index.js');
+  const providerInstance = await createProviderFromModel(config.model, {
+    endpoint: fullConfig?.getOllamaEndpoint?.() || 'http://localhost:11434',
+  });
+  
+  if (providerInstance) {
+    return providerInstance;
+  }
+
   const version = process.env.CLI_VERSION || process.version;
   const httpOptions = {
     headers: {
