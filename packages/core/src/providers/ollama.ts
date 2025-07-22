@@ -86,7 +86,11 @@ export class OllamaProvider {
       );
       return this.convertToGeminiResponse(response);
     } catch (error) {
-      throw new Error(`Ollama API error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Ollama API error for model '${model}': ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }. Ensure Ollama is running at ${this.endpoint}`
+      );
     }
   }
 
@@ -109,7 +113,11 @@ export class OllamaProvider {
         }
       }
     } catch (error) {
-      throw new Error(`Ollama streaming API error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `Ollama streaming API error for model '${model}': ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }. Ensure Ollama is running at ${this.endpoint}`
+      );
     }
   }
 
@@ -140,7 +148,7 @@ export class OllamaProvider {
       // Handle function calls in parts
       const functionCalls = content.parts?.filter((part: Part) => part.functionCall);
       if (functionCalls?.length > 0) {
-        message.tool_calls = functionCalls.map((fc: any) => ({
+        message.tool_calls = functionCalls.map((fc: Part) => ({
           id: fc.functionCall.id || this.generateId(),
           type: 'function' as const,
           function: {
