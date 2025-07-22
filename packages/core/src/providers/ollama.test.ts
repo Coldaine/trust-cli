@@ -162,12 +162,13 @@ describe('OllamaProvider', () => {
 
       mockFetch.mockResolvedValueOnce({
         ok: false,
-        status: 500,
-        statusText: 'Internal Server Error',
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        text: async () => 'Unprocessable Entity',
       });
 
       await expect(provider.generateContent(request)).rejects.toThrow(
-        'Ollama API error: HTTP 500: Internal Server Error',
+        'Ollama API error: HTTP 422: Unprocessable Entity',
       );
     });
   });

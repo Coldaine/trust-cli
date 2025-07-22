@@ -213,7 +213,8 @@ export class OllamaProvider {
         lastError = error instanceof Error ? error : new Error(String(error));
         
         // Don't retry on 4xx errors (client errors)
-        if (error instanceof Response && error.status >= 400 && error.status < 500) {
+        // Check if the error message contains HTTP 4xx status
+        if (lastError.message.match(/HTTP 4\d\d:/)) {
           throw lastError;
         }
         
