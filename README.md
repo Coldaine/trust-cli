@@ -84,6 +84,33 @@ Navigate to your trust-cli directory and run commands using the following format
    node bundle/trust.js
    ```
 
+### 🦙 Using with Ollama (Recommended)
+
+For the best experience with local models, you can use Trust CLI with Ollama:
+
+1. **Install Ollama** (if not already installed):
+   ```bash
+   curl -fsSL https://ollama.ai/install.sh | sh
+   ollama serve
+   ```
+
+2. **Pull a model and use it with Trust CLI**:
+   ```bash
+   # Pull a lightweight model
+   ollama pull qwen2.5:1.5b
+   
+   # Configure Trust CLI to use it
+   node bundle/trust.js config set model "ollama:qwen2.5:1.5b"
+   ```
+
+3. **Start using Trust CLI with Ollama**:
+   ```bash
+   node bundle/trust.js
+   # Now your conversations will use the local Ollama model
+   ```
+
+The `ollama:` prefix automatically routes requests to your local Ollama installation, providing fast, private AI interactions.
+
 ### 💡 Create an Alias for Easier Use
 
 To avoid typing `node bundle/trust.js` every time, create an alias:
