@@ -222,4 +222,229 @@ describe('OllamaProvider', () => {
       expect(result).toEqual([]);
     });
   });
+
+  describe('tool calling support', () => {
+    it('should handle function calls in requests', async () => {
+      const request = {
+        model: 'ollama:llama3',
+        contents: [{
+          role: 'user',
+          parts: [{
+            functionCall: {
+              name: 'get_weather',
+              args: { location: 'San Francisco' },
+            },
+          }],
+        }],
+      };
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          model: 'llama3',
+          created_at: '2024-01-01T00:00:00Z',
+          message: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [{
+              id: 'call_123',
+              type: 'function',
+              function: {
+                name: 'get_weather',
+                arguments: '{"location":"San Francisco"}',
+              },
+            }],
+          },
+          done: true,
+        }),
+      });
+
+      const result = await provider.generateContent(request);
+      expect(result.candidates[0].content.parts).toContainEqual(
+        expect.objectContaining({
+          functionCall: {
+            name: 'get_weather',
+            args: { location: 'San Francisco' },
+          },
+        })
+      );
+    });
+
+    it('should handle function responses', async () => {
+      const request = {
+        model: 'ollama:llama3',
+        contents: [{
+          role: 'function',
+          parts: [{
+            functionResponse: {
+              name: 'get_weather',
+              response: { temperature: 72, condition: 'sunny' },
+            },
+          }],
+        }],
+      };
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          model: 'llama3',
+          created_at: '2024-01-01T00:00:00Z',
+          message: {
+            role: 'assistant',
+            content: 'The weather in your location is sunny with a temperature of 72°F.',
+          },
+          done: true,
+        }),
+      });
+
+      const result = await provider.generateContent(request);
+      expect(result.candidates[0].content.parts[0].text).toContain('sunny');
+      expect(result.candidates[0].content.parts[0].text).toContain('72');
+      
+      // Verify the request was converted properly
+      const callArgs = mockFetch.mock.calls[0][1];
+      const requestBody = JSON.parse(callArgs.body);
+      expect(requestBody.messages[0]).toEqual(
+        expect.objectContaining({
+          role: 'tool',
+          tool_call_id: 'get_weather',
+          content: '{"temperature":72,"condition":"sunny"}',
+        })
+      );
+    });
+
+    it('should handle mixed content with text and function calls', async () => {
+      const request = {
+        model: 'ollama:llama3',
+        contents: [{
+          role: 'user',
+          parts: [
+            { text: 'Please check the weather and' },
+            {
+              functionCall: {
+                name: 'get_weather',
+                args: { location: 'New York' },
+              },
+            },
+          ],
+        }],
+      };
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          model: 'llama3',
+          created_at: '2024-01-01T00:00:00Z',
+          message: {
+            role: 'assistant',
+            content: 'I\'ll check the weather for you.',
+            tool_calls: [{
+              id: 'call_456',
+              type: 'function',
+              function: {
+                name: 'get_weather',
+                arguments: '{"location":"New York"}',
+              },
+            }],
+          },
+          done: true,
+        }),
+      });
+
+      const result = await provider.generateContent(request);
+      
+      // Should have both text and function call in response
+      expect(result.candidates[0].content.parts).toHaveLength(2);
+      expect(result.candidates[0].content.parts[0].text).toBe('I\'ll check the weather for you.');
+      expect(result.candidates[0].content.parts[1]).toEqual(
+        expect.objectContaining({
+          functionCall: {
+            name: 'get_weather',
+            args: { location: 'New York' },
+          },
+        })
+      );
+    });
+  });
+
+  describe('error handling and retry logic', () => {
+    it('should retry on server errors', async () => {
+      const request = {
+        model: 'llama3',
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+      };
+
+      // First two calls fail, third succeeds
+      mockFetch
+        .mockResolvedValueOnce({ ok: false, status: 500, statusText: 'Internal Server Error' })
+        .mockResolvedValueOnce({ ok: false, status: 503, statusText: 'Service Unavailable' })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            model: 'llama3',
+            message: { role: 'assistant', content: 'Hello!' },
+            done: true,
+          }),
+        });
+
+      const result = await provider.generateContent(request);
+      expect(result.candidates[0].content.parts[0].text).toBe('Hello!');
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+    });
+
+    it('should not retry on client errors', async () => {
+      const request = {
+        model: 'llama3',
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+      };
+
+      mockFetch.mockResolvedValueOnce({ 
+        ok: false, 
+        status: 400, 
+        statusText: 'Bad Request',
+        text: async () => 'Invalid model'
+      });
+
+      await expect(provider.generateContent(request)).rejects.toThrow('HTTP 400: Invalid model');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('environment variable configuration', () => {
+    it('should use environment variables for configuration', () => {
+      const originalEndpoint = process.env.OLLAMA_ENDPOINT;
+      const originalModel = process.env.OLLAMA_MODEL;
+      const originalTimeout = process.env.OLLAMA_TIMEOUT;
+      
+      try {
+        process.env.OLLAMA_ENDPOINT = 'http://custom-host:8080';
+        process.env.OLLAMA_MODEL = 'custom-model';
+        process.env.OLLAMA_TIMEOUT = '60000';
+        
+        const customProvider = new OllamaProvider();
+        
+        // Use reflection to check private properties (for testing purposes)
+        expect((customProvider as any).endpoint).toBe('http://custom-host:8080');
+        expect((customProvider as any).defaultModel).toBe('custom-model');
+        expect((customProvider as any).timeout).toBe(60000);
+      } finally {
+        // Restore original env vars
+        if (originalEndpoint !== undefined) {
+          process.env.OLLAMA_ENDPOINT = originalEndpoint;
+        } else {
+          delete process.env.OLLAMA_ENDPOINT;
+        }
+        if (originalModel !== undefined) {
+          process.env.OLLAMA_MODEL = originalModel;
+        } else {
+          delete process.env.OLLAMA_MODEL;
+        }
+        if (originalTimeout !== undefined) {
+          process.env.OLLAMA_TIMEOUT = originalTimeout;
+        } else {
+          delete process.env.OLLAMA_TIMEOUT;
+        }
+      }
+    });
+  });
 });

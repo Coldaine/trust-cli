@@ -9,7 +9,17 @@ import {
   extractProvider,
   isProviderSupported,
   getRegisteredProviders,
+  getProvider,
 } from './index.js';
+
+// Mock the Ollama provider
+vi.mock('./ollama.js', () => ({
+  OllamaProvider: vi.fn().mockImplementation(() => ({
+    isAvailable: vi.fn().mockResolvedValue(true),
+    generateContent: vi.fn(),
+    generateContentStream: vi.fn(),
+  })),
+}));
 
 describe('Provider Index (Unit Tests)', () => {
   beforeEach(() => {
@@ -73,6 +83,32 @@ describe('Provider Index (Unit Tests)', () => {
     it('should include ollama in registered providers', () => {
       const providers = getRegisteredProviders();
       expect(providers).toContain('ollama');
+    });
+  });
+
+  describe('provider functionality', () => {
+    it('should provide token counting estimation', async () => {
+      const provider = await getProvider('ollama');
+      
+      const result = await provider.countTokens({
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: 'This is a test message with several words' }],
+          },
+        ],
+      });
+      
+      expect(result.totalTokens).toBeGreaterThan(0);
+      expect(typeof result.totalTokens).toBe('number');
+    });
+
+    it('should throw error for embedding requests', async () => {
+      const provider = await getProvider('ollama');
+      
+      await expect(provider.embedContent({})).rejects.toThrow(
+        'Embedding is not supported by the Ollama provider'
+      );
     });
   });
 });

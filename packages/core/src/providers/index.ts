@@ -43,8 +43,19 @@ providerRegistry.set('ollama', async (config?: any): Promise<Provider> => {
     generateContentStream: async (request: GenerateContentParameters) => {
       return provider.generateContentStream(request);
     },
-    countTokens: async () => ({ totalTokens: 0 }), // Ollama doesn't provide token counting
-    embedContent: async () => ({ embedding: { values: [] } } as any), // Basic stub for embedding
+    countTokens: async (request: any) => {
+      // Simple word-based estimation (1 token ≈ 0.75 words)
+      const text = JSON.stringify(request.contents);
+      const wordCount = text.split(/\s+/).length;
+      const estimatedTokens = Math.ceil(wordCount / 0.75);
+      return { totalTokens: estimatedTokens };
+    },
+    embedContent: async () => {
+      throw new Error(
+        'Embedding is not supported by the Ollama provider. ' +
+        'Please use a different provider for embedding operations.'
+      );
+    },
     isAvailable: provider.isAvailable.bind(provider),
   };
 });

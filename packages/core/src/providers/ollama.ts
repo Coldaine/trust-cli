@@ -13,15 +13,25 @@ import {
 } from '@google/genai';
 
 export interface OllamaConfig {
-  endpoint: string;
-  model: string;
+  endpoint?: string;
+  model?: string;
   stream?: boolean;
+  timeout?: number;
+}
+
+export interface OllamaToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
 }
 
 export interface OllamaMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
-  tool_calls?: any[];
+  tool_calls?: OllamaToolCall[];
   tool_call_id?: string;
 }
 
@@ -31,6 +41,7 @@ export interface OllamaResponse {
   message: {
     role: 'assistant';
     content: string;
+    tool_calls?: OllamaToolCall[];
   };
   done: boolean;
 }
@@ -42,10 +53,20 @@ export interface OllamaResponse {
 export class OllamaProvider {
   private endpoint: string;
   private defaultModel: string;
+  private timeout: number;
 
   constructor(config: Partial<OllamaConfig> = {}) {
-    this.endpoint = config.endpoint || 'http://localhost:11434';
-    this.defaultModel = config.model || 'qwen2.5:1.5b';
+    this.endpoint = config.endpoint || 
+      process.env.OLLAMA_ENDPOINT || 
+      process.env.OLLAMA_HOST || 
+      'http://localhost:11434';
+    
+    this.defaultModel = config.model || 
+      process.env.OLLAMA_MODEL || 
+      'qwen2.5:1.5b';
+    
+    this.timeout = config.timeout || 
+      parseInt(process.env.OLLAMA_TIMEOUT || '30000', 10);
   }
 
   /**
@@ -60,7 +81,9 @@ export class OllamaProvider {
     const messages = this.convertToOllamaMessages(contents);
 
     try {
-      const response = await this.callOllamaAPI(model, messages, false);
+      const response = await this.callOllamaAPIWithRetry(
+        () => this.callOllamaAPI(model, messages, false)
+      );
       return this.convertToGeminiResponse(response);
     } catch (error) {
       throw new Error(`Ollama API error: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -78,7 +101,7 @@ export class OllamaProvider {
     const messages = this.convertToOllamaMessages(contents);
 
     try {
-      const streamResponse = await this.callOllamaAPIStream(model, messages);
+      const streamResponse = await this.callOllamaAPIStreamWithRetry(model, messages);
       
       for await (const chunk of streamResponse) {
         if (chunk && chunk.message) {
@@ -108,10 +131,59 @@ export class OllamaProvider {
       return [];
     }
     
-    return contents.map(content => ({
-      role: content.role === 'model' ? 'assistant' : content.role,
-      content: this.extractTextFromParts(content.parts || []),
-    }));
+    return contents.map(content => {
+      const message: OllamaMessage = {
+        role: this.convertRole(content.role),
+        content: this.extractTextFromParts(content.parts || []),
+      };
+
+      // Handle function calls in parts
+      const functionCalls = content.parts?.filter((part: Part) => part.functionCall);
+      if (functionCalls?.length > 0) {
+        message.tool_calls = functionCalls.map((fc: any) => ({
+          id: fc.functionCall.id || this.generateId(),
+          type: 'function' as const,
+          function: {
+            name: fc.functionCall.name,
+            arguments: JSON.stringify(fc.functionCall.args || {}),
+          },
+        }));
+      }
+
+      // Handle function responses
+      const functionResponse = content.parts?.find((part: Part) => part.functionResponse);
+      if (functionResponse) {
+        message.role = 'tool';
+        message.tool_call_id = functionResponse.functionResponse.name;
+        message.content = JSON.stringify(functionResponse.functionResponse.response);
+      }
+
+      return message;
+    });
+  }
+
+  /**
+   * Convert role from Gemini format to Ollama format
+   */
+  private convertRole(role: string): 'system' | 'user' | 'assistant' | 'tool' {
+    switch (role) {
+      case 'model':
+        return 'assistant';
+      case 'function':
+        return 'tool';
+      case 'system':
+        return 'system';
+      case 'user':
+      default:
+        return 'user';
+    }
+  }
+
+  /**
+   * Generate a unique ID for tool calls
+   */
+  private generateId(): string {
+    return `call_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
   }
 
   /**
@@ -122,6 +194,54 @@ export class OllamaProvider {
       .filter(part => part.text)
       .map(part => part.text)
       .join('\n');
+  }
+
+  /**
+   * Retry logic implementation
+   */
+  private async callOllamaAPIWithRetry<T>(
+    operation: () => Promise<T>,
+    maxRetries = 3,
+    backoffMs = 1000,
+  ): Promise<T> {
+    let lastError: Error;
+    
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        
+        // Don't retry on 4xx errors (client errors)
+        if (error instanceof Response && error.status >= 400 && error.status < 500) {
+          throw lastError;
+        }
+        
+        if (attempt < maxRetries - 1) {
+          const delay = backoffMs * Math.pow(2, attempt); // Exponential backoff
+          console.warn(`Ollama API attempt ${attempt + 1} failed, retrying in ${delay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    }
+    
+    throw new Error(`Ollama API failed after ${maxRetries} attempts: ${lastError!.message}`);
+  }
+
+  /**
+   * Retry wrapper for streaming requests
+   */
+  private async callOllamaAPIStreamWithRetry(
+    model: string,
+    messages: OllamaMessage[],
+    maxRetries = 2,
+    backoffMs = 1000,
+  ): Promise<AsyncGenerator<OllamaResponse>> {
+    return this.callOllamaAPIWithRetry(
+      () => this.callOllamaAPIStream(model, messages),
+      maxRetries,
+      backoffMs
+    );
   }
 
   /**
@@ -142,10 +262,12 @@ export class OllamaProvider {
         messages,
         stream,
       }),
+      signal: AbortSignal.timeout(this.timeout),
     });
 
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      const errorText = await response.text().catch(() => response.statusText);
+      throw new Error(`HTTP ${response.status}: ${errorText}`);
     }
 
     return await response.json();
@@ -168,10 +290,12 @@ export class OllamaProvider {
         messages,
         stream: true,
       }),
+      signal: AbortSignal.timeout(this.timeout),
     });
 
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      const errorText = await response.text().catch(() => response.statusText);
+      throw new Error(`HTTP ${response.status}: ${errorText}`);
     }
 
     const reader = response.body?.getReader();
@@ -180,7 +304,9 @@ export class OllamaProvider {
     }
 
     const decoder = new TextDecoder();
+    const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB
     let buffer = '';
+    let consecutiveErrors = 0;
 
     try {
       while (true) {
@@ -188,6 +314,12 @@ export class OllamaProvider {
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
+        
+        // Prevent memory exhaustion
+        if (buffer.length > MAX_BUFFER_SIZE) {
+          throw new Error('Response buffer exceeded 1MB - possible malformed response');
+        }
+
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
@@ -196,8 +328,13 @@ export class OllamaProvider {
             try {
               const chunk = JSON.parse(line);
               yield chunk;
+              consecutiveErrors = 0; // Reset error counter on success
             } catch (parseError) {
-              // Skip invalid JSON lines
+              console.warn(`[Ollama] Failed to parse streaming response: ${line.substring(0, 100)}...`);
+              // Don't silently continue - track consecutive errors
+              if (++consecutiveErrors > 5) {
+                throw new Error('Too many consecutive JSON parse errors in stream');
+              }
               continue;
             }
           }
@@ -212,11 +349,29 @@ export class OllamaProvider {
    * Convert Ollama response to Gemini format
    */
   private convertToGeminiResponse(ollamaResponse: OllamaResponse): GenerateContentResponse {
+    const parts: Part[] = [];
+    
+    if (ollamaResponse.message.content) {
+      parts.push({ text: ollamaResponse.message.content });
+    }
+
+    // Handle tool calls in the response
+    if (ollamaResponse.message.tool_calls) {
+      for (const toolCall of ollamaResponse.message.tool_calls) {
+        parts.push({
+          functionCall: {
+            name: toolCall.function.name,
+            args: JSON.parse(toolCall.function.arguments),
+          },
+        });
+      }
+    }
+
     return {
       candidates: [
         {
           content: {
-            parts: [{ text: ollamaResponse.message.content }],
+            parts,
             role: 'model',
           },
           finishReason: ollamaResponse.done ? FinishReason.STOP : FinishReason.OTHER,
