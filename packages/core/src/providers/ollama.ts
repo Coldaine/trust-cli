@@ -11,6 +11,7 @@ import {
   FunctionCall,
   FinishReason,
 } from '@google/genai';
+import { getModelConfig, modelSupportsTools } from './ollama-model-configs.js';
 
 export interface OllamaConfig {
   endpoint?: string;
@@ -78,6 +79,13 @@ export class OllamaProvider {
   ): Promise<GenerateContentResponse> {
     const model = this.extractModelName(request.model || this.defaultModel);
     const contents = Array.isArray(request.contents) ? request.contents : [];
+    
+    // Check if request contains tool calls
+    const hasToolCalls = this.checkForToolCalls(contents);
+    if (hasToolCalls) {
+      this.validateModelToolSupport(model);
+    }
+    
     const messages = this.convertToOllamaMessages(contents);
 
     try {
@@ -102,6 +110,13 @@ export class OllamaProvider {
   ): AsyncGenerator<GenerateContentResponse> {
     const model = this.extractModelName(request.model || this.defaultModel);
     const contents = Array.isArray(request.contents) ? request.contents : [];
+    
+    // Check if request contains tool calls
+    const hasToolCalls = this.checkForToolCalls(contents);
+    if (hasToolCalls) {
+      this.validateModelToolSupport(model);
+    }
+    
     const messages = this.convertToOllamaMessages(contents);
 
     try {
@@ -429,5 +444,43 @@ export class OllamaProvider {
     } catch {
       return [];
     }
+  }
+
+  /**
+   * Check if the content contains tool/function calls
+   */
+  private checkForToolCalls(contents: any[]): boolean {
+    return contents.some(content => 
+      content.parts?.some((part: Part) => 
+        part.functionCall || part.functionResponse
+      )
+    );
+  }
+
+  /**
+   * Validate if the model supports tool calling
+   */
+  private validateModelToolSupport(model: string): void {
+    const modelConfig = getModelConfig(model);
+    
+    if (!modelConfig.supportsToolCalling) {
+      console.warn(
+        `⚠️  Model '${model}' does not natively support tool calling. ` +
+        `Tool calls may not work as expected. ` +
+        `Consider using one of these models instead: qwen3, qwen2.5:1.5b, llama3.1`
+      );
+      
+      if (modelConfig.notes) {
+        console.warn(`   Note: ${modelConfig.notes}`);
+      }
+    }
+  }
+
+  /**
+   * Get list of models that support tool calling
+   */
+  async getToolSupportedModels(): Promise<string[]> {
+    const allModels = await this.listModels();
+    return allModels.filter(model => modelSupportsTools(model));
   }
 }

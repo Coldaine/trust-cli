@@ -448,4 +448,136 @@ describe('OllamaProvider', () => {
       }
     });
   });
+
+  describe('model-specific tool support warnings', () => {
+    let consoleWarnSpy: any;
+
+    beforeEach(() => {
+      consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      consoleWarnSpy.mockRestore();
+    });
+
+    it('should warn when using Gemma 3 with tool calls', async () => {
+      const request = {
+        model: 'ollama:gemma3',
+        contents: [{
+          role: 'user',
+          parts: [{
+            functionCall: {
+              name: 'get_weather',
+              args: { location: 'Paris' },
+            },
+          }],
+        }],
+      };
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          model: 'gemma3',
+          message: { role: 'assistant', content: 'I cannot use tools.' },
+          done: true,
+        }),
+      });
+
+      await provider.generateContent(request);
+
+      expect(consoleWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Model 'gemma3' does not natively support tool calling")
+      );
+      expect(consoleWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("No native tool support")
+      );
+    });
+
+    it('should not warn when using Qwen 3 with tool calls', async () => {
+      const request = {
+        model: 'ollama:qwen3',
+        contents: [{
+          role: 'user',
+          parts: [{
+            functionCall: {
+              name: 'get_weather',
+              args: { location: 'London' },
+            },
+          }],
+        }],
+      };
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          model: 'qwen3',
+          message: { 
+            role: 'assistant', 
+            content: '',
+            tool_calls: [{
+              id: 'call_123',
+              type: 'function',
+              function: {
+                name: 'get_weather',
+                arguments: '{"location":"London"}',
+              },
+            }],
+          },
+          done: true,
+        }),
+      });
+
+      await provider.generateContent(request);
+
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+    });
+
+    it('should not warn when not using tool calls', async () => {
+      const request = {
+        model: 'ollama:gemma3',
+        contents: [{
+          role: 'user',
+          parts: [{ text: 'Hello, how are you?' }],
+        }],
+      };
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          model: 'gemma3',
+          message: { role: 'assistant', content: 'I am doing well, thank you!' },
+          done: true,
+        }),
+      });
+
+      await provider.generateContent(request);
+
+      expect(consoleWarnSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getToolSupportedModels', () => {
+    it('should filter models that support tools', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          models: [
+            { name: 'qwen3' },
+            { name: 'qwen2.5:1.5b' },
+            { name: 'gemma3' },
+            { name: 'llama3.1' },
+            { name: 'gemma2' },
+          ],
+        }),
+      });
+
+      const supportedModels = await provider.getToolSupportedModels();
+      
+      expect(supportedModels).toContain('qwen3');
+      expect(supportedModels).toContain('qwen2.5:1.5b');
+      expect(supportedModels).toContain('llama3.1');
+      expect(supportedModels).not.toContain('gemma3');
+      expect(supportedModels).not.toContain('gemma2');
+    });
+  });
 });
